@@ -1177,7 +1177,7 @@ pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAg
         .get("agents")
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
-    let mut agents: Vec<RelayAgentInfo> =
+    let agents: Vec<RelayAgentInfo> =
         serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))?;
 
     // kind:10100 profiles are sparse: respond_to policy lives on kind:30177 and
