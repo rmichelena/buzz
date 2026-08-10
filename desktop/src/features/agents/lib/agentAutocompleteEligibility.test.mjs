@@ -131,6 +131,26 @@ test("relayAgentCanRespondInChannel: requires exact channel membership and viewe
   );
 });
 
+test("relayAgentCanRespondInChannel: channel-member fallback still fail-closed for owner-only", () => {
+  const agent = {
+    pubkey: PUB_B,
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+    channelIds: [],
+  };
+  const channelMemberAgentPubkeys = new Set([PUB_B]);
+
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      agent,
+      "general",
+      OTHER_OWNER_PUBKEY,
+      channelMemberAgentPubkeys,
+    ),
+    false,
+  );
+});
+
 test("relayAgentCanRespondInChannel: accepts channel member bots when directory channel_ids lag", () => {
   const agent = {
     pubkey: PUB_B,
