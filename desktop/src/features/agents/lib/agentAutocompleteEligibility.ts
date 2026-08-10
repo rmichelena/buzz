@@ -1,5 +1,24 @@
-import type { Channel, RelayAgent } from "@/shared/api/types";
+import type { Channel, ChannelMember, RelayAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+
+export function computeChannelMemberAgentPubkeys(
+  mentionChannelId: string | null,
+  members: readonly ChannelMember[] | undefined,
+  membersLoading: boolean,
+  hasExternalMembers: boolean,
+): ReadonlySet<string> | undefined {
+  if (!mentionChannelId) {
+    return undefined;
+  }
+  if (!hasExternalMembers && membersLoading) {
+    return new Set<string>();
+  }
+  return new Set(
+    (members ?? [])
+      .filter((member) => member.isAgent === true || member.role === "bot")
+      .map((member) => normalizePubkey(member.pubkey)),
+  );
+}
 
 export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
   return new Set(
@@ -70,7 +89,13 @@ export function relayAgentCanRespondInChannel(
 
 export type AgentEligibilityScope =
   | { type: "community" }
-  | { type: "channel"; channelId: string }
+  | {
+      type: "channel";
+      channelId: string;
+      channelMembers?: readonly ChannelMember[];
+      membersLoading?: boolean;
+      hasExternalMembers?: boolean;
+    }
   | { type: "managed-only" };
 
 export function getMentionableAgentPubkeys({
@@ -88,6 +113,17 @@ export function getMentionableAgentPubkeys({
   relayAgents: readonly RelayAgent[] | undefined;
   sharedChannelIds: ReadonlySet<string>;
 }) {
+  const resolvedChannelMemberAgentPubkeys =
+    channelMemberAgentPubkeys ??
+    (eligibilityScope.type === "channel"
+      ? computeChannelMemberAgentPubkeys(
+          eligibilityScope.channelId,
+          eligibilityScope.channelMembers,
+          eligibilityScope.membersLoading ?? false,
+          eligibilityScope.hasExternalMembers ?? false,
+        )
+      : undefined);
+
   const pubkeys = new Set(
     [...managedAgentPubkeys].map((pubkey) => normalizePubkey(pubkey)),
   );
@@ -105,7 +141,7 @@ export function getMentionableAgentPubkeys({
               agent,
               eligibilityScope.channelId,
               currentPubkey,
-              channelMemberAgentPubkeys,
+              resolvedChannelMemberAgentPubkeys,
             );
     if (isAllowed) {
       pubkeys.add(normalizePubkey(agent.pubkey));

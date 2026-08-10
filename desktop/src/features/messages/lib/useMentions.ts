@@ -197,35 +197,19 @@ export function useMentions(
   const mentionChannelId = isAgentMentionChannelType(options?.channelType)
     ? channelId
     : null;
-  const channelMemberAgentPubkeys = React.useMemo(() => {
-    if (!mentionChannelId) {
-      return undefined;
-    }
-    if (externalMembers === undefined && membersQuery.isLoading) {
-      return new Set<string>();
-    }
-    return new Set(
-      (members ?? [])
-        .filter((member) => member.isAgent === true || member.role === "bot")
-        .map((member) => normalizePubkey(member.pubkey)),
-    );
-  }, [externalMembers, members, mentionChannelId, membersQuery.isLoading]);
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
-        channelMemberAgentPubkeys,
         currentPubkey,
         eligibilityScope: mentionChannelId
-          ? { type: "channel", channelId: mentionChannelId }
+          ? { type: "channel", channelId: mentionChannelId, channelMembers: members, membersLoading: membersQuery.isLoading, hasExternalMembers: externalMembers !== undefined }
           : { type: "managed-only" },
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
       }),
     [
-      channelMemberAgentPubkeys,
-      currentPubkey,
-      managedAgentPubkeys,
+      currentPubkey, externalMembers, managedAgentPubkeys, members, membersQuery.isLoading,
       mentionChannelId,
       relayAgentsQuery.data,
       sharedChannelIds,
