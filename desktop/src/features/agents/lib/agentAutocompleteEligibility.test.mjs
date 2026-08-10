@@ -112,6 +112,7 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
 
 test("relayAgentCanRespondInChannel: requires exact channel membership and viewer access", () => {
   const agent = {
+    pubkey: PUB_B,
     respondTo: "allowlist",
     respondToAllowlist: [CURRENT_PUBKEY],
     channelIds: ["general"],
@@ -140,6 +141,35 @@ test("relayAgentCanRespondInChannel: channel-member fallback still fail-closed f
   };
   const channelMemberAgentPubkeys = new Set([PUB_B]);
 
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      agent,
+      "general",
+      OTHER_OWNER_PUBKEY,
+      channelMemberAgentPubkeys,
+    ),
+    false,
+  );
+});
+
+test("relayAgentCanRespondInChannel: allowlist agents use live membership during 39002 lag", () => {
+  const agent = {
+    pubkey: PUB_B,
+    respondTo: "allowlist",
+    respondToAllowlist: [CURRENT_PUBKEY],
+    channelIds: [],
+  };
+  const channelMemberAgentPubkeys = new Set([PUB_B]);
+
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      agent,
+      "general",
+      CURRENT_PUBKEY,
+      channelMemberAgentPubkeys,
+    ),
+    true,
+  );
   assert.equal(
     relayAgentCanRespondInChannel(
       agent,

@@ -22,6 +22,8 @@ export function relayAgentIsSharedWithUser(
     ? normalizePubkey(currentPubkey)
     : null;
 
+  // Allowlist agents skip the shared-channel overlap check; once the viewer is
+  // allowlisted, live NIP-29 membership can admit them during 39002 lag windows.
   if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
     return agent.respondToAllowlist
       .map((pubkey) => normalizePubkey(pubkey))
@@ -97,7 +99,9 @@ export function getMentionableAgentPubkeys({
       eligibilityScope.type === "managed-only"
         ? false
         : eligibilityScope.type === "community"
-          ? relayAgentIsSharedWithUser(
+          ? // Community/global autocomplete has no single channel context, so we
+            // intentionally omit the live-membership fallback here.
+            relayAgentIsSharedWithUser(
               agent,
               sharedChannelIds,
               currentPubkey,

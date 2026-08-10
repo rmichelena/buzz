@@ -37,15 +37,58 @@ fn channel_ids_from_membership_events(events: &[nostr::Event]) -> Vec<String> {
     sorted
 }
 
+fn channel_ids_by_agent_from_membership_events(
+    events: &[nostr::Event],
+    agent_pubkeys: &HashSet<String>,
+) -> HashMap<String, Vec<String>> {
+    let mut by_agent: HashMap<String, HashSet<String>> = HashMap::new();
+    for event in events {
+        let Some(channel_id) = d_tag_from_event(event) else {
+            continue;
+        };
+        for tag in &event.tags {
+            let slice = tag.as_slice();
+            if slice.first().map(String::as_str) != Some("p") {
+                continue;
+            }
+            let Some(agent_pubkey) = slice.get(1).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            if agent_pubkeys.contains(agent_pubkey) {
+                by_agent
+                    .entry(agent_pubkey.clone())
+                    .or_default()
+                    .insert(channel_id.clone());
+            }
+        }
+    }
+
+    let mut sorted: HashMap<String, Vec<String>> = HashMap::with_capacity(by_agent.len());
+    for (agent_pubkey, channel_ids) in by_agent {
+        let mut channel_ids: Vec<String> = channel_ids.into_iter().collect();
+        channel_ids.sort();
+        sorted.insert(agent_pubkey, channel_ids);
+    }
+    sorted
+}
+
 fn collect_managed_agent_definitions(
     events: &[nostr::Event],
+    expected_owners: &HashMap<String, String>,
 ) -> HashMap<String, (crate::managed_agents::RespondTo, Vec<String>)> {
-    let mut definitions = HashMap::new();
+    let mut definitions: HashMap<String, (crate::managed_agents::RespondTo, Vec<String>, u64)> =
+        HashMap::new();
     for event in events {
         let Some(agent_pubkey) = d_tag_from_event(event) else {
             tracing::warn!("list_relay_agents: skipping kind:30177 event without d-tag");
             continue;
         };
+        let event_author = event.pubkey.to_hex();
+        if let Some(expected_owner) = expected_owners.get(&agent_pubkey) {
+            if event_author != *expected_owner {
+                continue;
+            }
+        }
         let Ok(content) = managed_agent_content_from_event(event) else {
             tracing::warn!(
                 agent_pubkey = %agent_pubkey,
@@ -53,12 +96,19 @@ fn collect_managed_agent_definitions(
             );
             continue;
         };
-        definitions.insert(
-            agent_pubkey,
-            (content.respond_to, content.respond_to_allowlist),
-        );
+        let created_at = event.created_at.as_secs();
+        match definitions.get(&agent_pubkey) {
+            Some((_, _, existing_created_at)) if created_at <= *existing_created_at => continue,
+            _ => definitions.insert(
+                agent_pubkey,
+                (content.respond_to, content.respond_to_allowlist, created_at),
+            ),
+        }
     }
     definitions
+        .into_iter()
+        .map(|(agent_pubkey, (respond_to, allowlist, _))| (agent_pubkey, (respond_to, allowlist)))
+        .collect()
 }
 
 fn merge_channel_ids(existing: &[String], discovered: &[String]) -> Vec<String> {
@@ -72,35 +122,60 @@ fn merge_channel_ids(existing: &[String], discovered: &[String]) -> Vec<String> 
     channel_ids
 }
 
-async fn fetch_agent_channel_ids(
+async fn fetch_agent_owner_pubkeys(
     state: &AppState,
-    agent_pubkey: &str,
-) -> Result<Vec<String>, String> {
-    let events = query_relay(
+    agent_pubkeys: &[String],
+) -> HashMap<String, String> {
+    if agent_pubkeys.is_empty() {
+        return HashMap::new();
+    }
+
+    match query_relay(
         state,
         &[serde_json::json!({
-            "kinds": [39002],
-            "#p": [agent_pubkey],
-        })],
-    )
-    .await?;
-
-    Ok(channel_ids_from_membership_events(&events))
-}
-
-async fn enrich_relay_agents_from_relay(
-    state: &AppState,
-    mut agents: Vec<RelayAgentInfo>,
-) -> Vec<RelayAgentInfo> {
-    let definitions = match query_relay(
-        state,
-        &[serde_json::json!({
-            "kinds": [KIND_MANAGED_AGENT],
+            "kinds": [0],
+            "authors": agent_pubkeys,
+            "limit": agent_pubkeys.len(),
         })],
     )
     .await
     {
-        Ok(definition_events) => collect_managed_agent_definitions(&definition_events),
+        Ok(profile_events) => profile_events
+            .into_iter()
+            .filter_map(|event| {
+                nostr_convert::profile_valid_oa_owner_pubkey(&event)
+                    .map(|owner| (event.pubkey.to_hex(), owner))
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "list_relay_agents: kind:0 owner lookup failed; continuing without owner filter"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+async fn fetch_managed_agent_definitions(
+    state: &AppState,
+    agent_pubkeys: &[String],
+    expected_owners: &HashMap<String, String>,
+) -> HashMap<String, (crate::managed_agents::RespondTo, Vec<String>)> {
+    if agent_pubkeys.is_empty() {
+        return HashMap::new();
+    }
+
+    let filter = serde_json::json!({
+        "kinds": [KIND_MANAGED_AGENT],
+        "#d": agent_pubkeys,
+        "limit": agent_pubkeys.len(),
+    });
+
+    match query_relay(state, &[filter]).await {
+        Ok(definition_events) => {
+            collect_managed_agent_definitions(&definition_events, expected_owners)
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -108,7 +183,50 @@ async fn enrich_relay_agents_from_relay(
             );
             HashMap::new()
         }
-    };
+    }
+}
+
+async fn fetch_channel_ids_by_agent(
+    state: &AppState,
+    agent_pubkeys: &[String],
+) -> HashMap<String, Vec<String>> {
+    if agent_pubkeys.is_empty() {
+        return HashMap::new();
+    }
+
+    match query_relay(
+        state,
+        &[serde_json::json!({
+            "kinds": [39002],
+            "#p": agent_pubkeys,
+            "limit": agent_pubkeys.len(),
+        })],
+    )
+    .await
+    {
+        Ok(membership_events) => channel_ids_by_agent_from_membership_events(
+            &membership_events,
+            &agent_pubkeys.iter().cloned().collect(),
+        ),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "list_relay_agents: kind:39002 membership enrich failed"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+async fn enrich_relay_agents_from_relay(
+    state: &AppState,
+    mut agents: Vec<RelayAgentInfo>,
+) -> Vec<RelayAgentInfo> {
+    let agent_pubkeys: Vec<String> = agents.iter().map(|agent| agent.pubkey.clone()).collect();
+    let expected_owners = fetch_agent_owner_pubkeys(state, &agent_pubkeys).await;
+    let definitions =
+        fetch_managed_agent_definitions(state, &agent_pubkeys, &expected_owners).await;
+    let channel_ids_by_agent = fetch_channel_ids_by_agent(state, &agent_pubkeys).await;
 
     for agent in &mut agents {
         if let Some((respond_to, allowlist)) = definitions.get(&agent.pubkey) {
@@ -116,17 +234,8 @@ async fn enrich_relay_agents_from_relay(
             agent.respond_to_allowlist = allowlist.clone();
         }
 
-        match fetch_agent_channel_ids(state, &agent.pubkey).await {
-            Ok(discovered_channel_ids) => {
-                agent.channel_ids = merge_channel_ids(&agent.channel_ids, &discovered_channel_ids);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    agent_pubkey = %agent.pubkey,
-                    error = %error,
-                    "list_relay_agents: kind:39002 membership enrich failed for agent"
-                );
-            }
+        if let Some(discovered_channel_ids) = channel_ids_by_agent.get(&agent.pubkey) {
+            agent.channel_ids = merge_channel_ids(&agent.channel_ids, discovered_channel_ids);
         }
     }
 
@@ -1262,32 +1371,38 @@ mod tests {
 
     // ── relay agent directory enrich helpers ──────────────────────────────────
 
-    fn test_membership_event(channel_id: &str) -> nostr::Event {
+    fn test_membership_event(channel_id: &str, member_pubkey: &str) -> nostr::Event {
         use nostr::{EventBuilder, Keys, Kind, Tag};
         let keys = Keys::generate();
         EventBuilder::new(Kind::Custom(39_002), "")
-            .tags(vec![Tag::parse(["d", channel_id]).unwrap()])
+            .tags(vec![
+                Tag::parse(["d", channel_id]).unwrap(),
+                Tag::parse(["p", member_pubkey, "", "member"]).unwrap(),
+            ])
             .sign_with_keys(&keys)
             .unwrap()
     }
 
-    fn test_managed_agent_definition_event(agent_pubkey: &str, respond_to: &str) -> nostr::Event {
-        use nostr::{EventBuilder, Keys, Kind, Tag};
+    fn test_managed_agent_definition_event(
+        agent_pubkey: &str,
+        respond_to: &str,
+        author_keys: &nostr::Keys,
+    ) -> nostr::Event {
+        use nostr::{EventBuilder, Kind, Tag};
         let content = serde_json::json!({
             "name": "Scout",
             "parallelism": 1,
             "respond_to": respond_to,
         });
-        let keys = Keys::generate();
         EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content.to_string())
             .tags(vec![Tag::parse(["d", agent_pubkey]).unwrap()])
-            .sign_with_keys(&keys)
+            .sign_with_keys(author_keys)
             .unwrap()
     }
 
     #[test]
     fn test_d_tag_from_event_reads_first_non_empty_d_tag() {
-        let event = test_membership_event("273e2bad-b694-4a0e-bc2b-aefcc7d027bb");
+        let event = test_membership_event("273e2bad-b694-4a0e-bc2b-aefcc7d027bb", &"a".repeat(64));
         assert_eq!(
             d_tag_from_event(&event).as_deref(),
             Some("273e2bad-b694-4a0e-bc2b-aefcc7d027bb")
@@ -1306,10 +1421,11 @@ mod tests {
 
     #[test]
     fn test_channel_ids_from_membership_events_deduplicates_and_sorts() {
+        let member_pubkey = "a".repeat(64);
         let events = vec![
-            test_membership_event("channel-b"),
-            test_membership_event("channel-a"),
-            test_membership_event("channel-b"),
+            test_membership_event("channel-b", &member_pubkey),
+            test_membership_event("channel-a", &member_pubkey),
+            test_membership_event("channel-b", &member_pubkey),
         ];
         assert_eq!(
             channel_ids_from_membership_events(&events),
@@ -1318,13 +1434,79 @@ mod tests {
     }
 
     #[test]
+    fn test_channel_ids_by_agent_from_membership_events_groups_by_p_tag() {
+        let agent_a = "a".repeat(64);
+        let agent_b = "b".repeat(64);
+        let events = vec![
+            test_membership_event("channel-a", &agent_a),
+            test_membership_event("channel-b", &agent_b),
+            test_membership_event("channel-c", &agent_a),
+        ];
+        let agent_pubkeys = HashSet::from([agent_a.clone(), agent_b.clone()]);
+        let by_agent = channel_ids_by_agent_from_membership_events(&events, &agent_pubkeys);
+        assert_eq!(
+            by_agent.get(&agent_a),
+            Some(&vec!["channel-a".to_string(), "channel-c".to_string()])
+        );
+        assert_eq!(by_agent.get(&agent_b), Some(&vec!["channel-b".to_string()]));
+    }
+
+    #[test]
     fn test_collect_managed_agent_definitions_indexes_by_d_tag() {
+        use nostr::Keys;
         let agent_pubkey = "a".repeat(64);
-        let events = vec![test_managed_agent_definition_event(&agent_pubkey, "anyone")];
-        let definitions = collect_managed_agent_definitions(&events);
+        let owner_keys = Keys::generate();
+        let events = vec![test_managed_agent_definition_event(
+            &agent_pubkey,
+            "anyone",
+            &owner_keys,
+        )];
+        let definitions = collect_managed_agent_definitions(&events, &HashMap::new());
         let (respond_to, allowlist) = definitions.get(&agent_pubkey).unwrap();
         assert_eq!(*respond_to, crate::managed_agents::RespondTo::Anyone);
         assert!(allowlist.is_empty());
+    }
+
+    #[test]
+    fn test_collect_managed_agent_definitions_prefers_newest_created_at() {
+        use nostr::{EventBuilder, Kind, Tag, Timestamp};
+        let agent_pubkey = "a".repeat(64);
+        let owner_keys = nostr::Keys::generate();
+        let older = EventBuilder::new(
+            Kind::Custom(KIND_MANAGED_AGENT as u16),
+            r#"{"name":"Scout","parallelism":1,"respond_to":"owner-only"}"#,
+        )
+        .tags(vec![Tag::parse(["d", &agent_pubkey]).unwrap()])
+        .created_at(Timestamp::from(100))
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+        let newer = EventBuilder::new(
+            Kind::Custom(KIND_MANAGED_AGENT as u16),
+            r#"{"name":"Scout","parallelism":1,"respond_to":"anyone"}"#,
+        )
+        .tags(vec![Tag::parse(["d", &agent_pubkey]).unwrap()])
+        .created_at(Timestamp::from(200))
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+        let definitions = collect_managed_agent_definitions(&[older, newer], &HashMap::new());
+        let (respond_to, _) = definitions.get(&agent_pubkey).unwrap();
+        assert_eq!(*respond_to, crate::managed_agents::RespondTo::Anyone);
+    }
+
+    #[test]
+    fn test_collect_managed_agent_definitions_filters_unexpected_authors() {
+        use nostr::Keys;
+        let agent_pubkey = "a".repeat(64);
+        let owner_keys = Keys::generate();
+        let spoof_keys = Keys::generate();
+        let expected_owners =
+            HashMap::from([(agent_pubkey.clone(), owner_keys.public_key().to_hex())]);
+        let legitimate = test_managed_agent_definition_event(&agent_pubkey, "anyone", &owner_keys);
+        let spoofed = test_managed_agent_definition_event(&agent_pubkey, "owner-only", &spoof_keys);
+        let definitions =
+            collect_managed_agent_definitions(&[legitimate, spoofed], &expected_owners);
+        let (respond_to, _) = definitions.get(&agent_pubkey).unwrap();
+        assert_eq!(*respond_to, crate::managed_agents::RespondTo::Anyone);
     }
 
     #[test]
