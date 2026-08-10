@@ -197,9 +197,20 @@ export function useMentions(
   const mentionChannelId = isAgentMentionChannelType(options?.channelType)
     ? channelId
     : null;
+  const channelMemberAgentPubkeys = React.useMemo(() => {
+    if (!mentionChannelId) {
+      return undefined;
+    }
+    return new Set(
+      (members ?? [])
+        .filter((member) => member.isAgent === true || member.role === "bot")
+        .map((member) => normalizePubkey(member.pubkey)),
+    );
+  }, [members, mentionChannelId]);
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
+        channelMemberAgentPubkeys,
         currentPubkey,
         eligibilityScope: mentionChannelId
           ? { type: "channel", channelId: mentionChannelId }
@@ -209,6 +220,7 @@ export function useMentions(
         sharedChannelIds,
       }),
     [
+      channelMemberAgentPubkeys,
       currentPubkey,
       managedAgentPubkeys,
       mentionChannelId,

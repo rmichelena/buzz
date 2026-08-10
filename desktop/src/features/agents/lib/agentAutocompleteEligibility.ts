@@ -10,9 +10,13 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
 }
 
 export function relayAgentIsSharedWithUser(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
+  agent: Pick<
+    RelayAgent,
+    "pubkey" | "channelIds" | "respondTo" | "respondToAllowlist"
+  >,
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
+  channelMemberAgentPubkeys?: ReadonlySet<string>,
 ) {
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
@@ -24,20 +28,43 @@ export function relayAgentIsSharedWithUser(
       .includes(normalizedCurrentPubkey);
   }
 
+  if (agent.respondTo !== "anyone") {
+    return false;
+  }
+
+  if (agent.channelIds.some((channelId) => sharedChannelIds.has(channelId))) {
+    return true;
+  }
+
+  // Relay directory channel_ids can lag behind live channel membership; callers
+  // pass bot members from the active channel composer as a fresher signal.
   return (
-    agent.respondTo === "anyone" &&
-    agent.channelIds.some((channelId) => sharedChannelIds.has(channelId))
+    channelMemberAgentPubkeys?.has(normalizePubkey(agent.pubkey)) === true
   );
 }
 
 export function relayAgentCanRespondInChannel(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
+  agent: Pick<
+    RelayAgent,
+    "pubkey" | "channelIds" | "respondTo" | "respondToAllowlist"
+  >,
   channelId: string,
   currentPubkey?: string | null,
+  channelMemberAgentPubkeys?: ReadonlySet<string>,
 ) {
-  return (
-    agent.channelIds.includes(channelId) &&
-    relayAgentIsSharedWithUser(agent, new Set([channelId]), currentPubkey)
+  const normalizedPubkey = normalizePubkey(agent.pubkey);
+  const inChannel =
+    agent.channelIds.includes(channelId) ||
+    channelMemberAgentPubkeys?.has(normalizedPubkey) === true;
+  if (!inChannel) {
+    return false;
+  }
+
+  return relayAgentIsSharedWithUser(
+    agent,
+    new Set([channelId]),
+    currentPubkey,
+    channelMemberAgentPubkeys,
   );
 }
 
@@ -47,12 +74,14 @@ export type AgentEligibilityScope =
   | { type: "managed-only" };
 
 export function getMentionableAgentPubkeys({
+  channelMemberAgentPubkeys,
   currentPubkey,
   eligibilityScope,
   managedAgentPubkeys,
   relayAgents,
   sharedChannelIds,
 }: {
+  channelMemberAgentPubkeys?: ReadonlySet<string>;
   currentPubkey?: string | null;
   eligibilityScope: AgentEligibilityScope;
   managedAgentPubkeys: Iterable<string>;
@@ -68,11 +97,16 @@ export function getMentionableAgentPubkeys({
       eligibilityScope.type === "managed-only"
         ? false
         : eligibilityScope.type === "community"
-          ? relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)
+          ? relayAgentIsSharedWithUser(
+              agent,
+              sharedChannelIds,
+              currentPubkey,
+            )
           : relayAgentCanRespondInChannel(
               agent,
               eligibilityScope.channelId,
               currentPubkey,
+              channelMemberAgentPubkeys,
             );
     if (isAllowed) {
       pubkeys.add(normalizePubkey(agent.pubkey));

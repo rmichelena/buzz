@@ -131,6 +131,49 @@ test("relayAgentCanRespondInChannel: requires exact channel membership and viewe
   );
 });
 
+test("relayAgentCanRespondInChannel: accepts channel member bots when directory channel_ids lag", () => {
+  const agent = {
+    pubkey: PUB_B,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: [],
+  };
+  const channelMemberAgentPubkeys = new Set([PUB_B]);
+
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      agent,
+      "general",
+      CURRENT_PUBKEY,
+      channelMemberAgentPubkeys,
+    ),
+    true,
+  );
+});
+
+test("getMentionableAgentPubkeys: channel scope admits relay agents via live membership", () => {
+  const relayAgents = [
+    {
+      pubkey: PUB_B,
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [],
+    },
+  ];
+
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      currentPubkey: CURRENT_PUBKEY,
+      eligibilityScope: { type: "channel", channelId: "general" },
+      managedAgentPubkeys: [PUB_A],
+      relayAgents,
+      sharedChannelIds: new Set(["general"]),
+      channelMemberAgentPubkeys: new Set([PUB_B]),
+    }),
+    new Set([PUB_A, PUB_B]),
+  );
+});
+
 test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents", () => {
   const result = getMentionableAgentPubkeys({
     eligibilityScope: { type: "community" },

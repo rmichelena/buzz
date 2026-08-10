@@ -1,15 +1,99 @@
+use std::collections::{HashMap, HashSet};
+
+use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
 use tauri::State;
 
 use crate::{
     app_state::AppState,
     managed_agents::{
-        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
-        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
-        RelayAgentInfo, DEFAULT_ACP_COMMAND,
+        agent_events::managed_agent_content_from_event, command_availability,
+        is_npm_global_install, AcpRuntimeCatalogEntry, DiscoverManagedAgentPrereqsRequest,
+        InstallRuntimeResult, ManagedAgentPrereqsInfo, RelayAgentInfo, DEFAULT_ACP_COMMAND,
     },
     nostr_convert,
     relay::query_relay,
 };
+
+fn d_tag_from_event(event: &nostr::Event) -> Option<String> {
+    event.tags.iter().find_map(|tag| {
+        let slice = tag.as_slice();
+        if slice.first().map(String::as_str) == Some("d") {
+            slice.get(1).filter(|value| !value.is_empty()).cloned()
+        } else {
+            None
+        }
+    })
+}
+
+async fn fetch_agent_channel_ids(
+    state: &AppState,
+    agent_pubkey: &str,
+) -> Result<Vec<String>, String> {
+    let events = query_relay(
+        state,
+        &[serde_json::json!({
+            "kinds": [39002],
+            "#p": [agent_pubkey],
+        })],
+    )
+    .await?;
+
+    let mut channel_ids = HashSet::new();
+    for event in &events {
+        if let Some(channel_id) = d_tag_from_event(event) {
+            channel_ids.insert(channel_id);
+        }
+    }
+    let mut sorted: Vec<String> = channel_ids.into_iter().collect();
+    sorted.sort();
+    Ok(sorted)
+}
+
+async fn enrich_relay_agents_from_relay(
+    state: &AppState,
+    mut agents: Vec<RelayAgentInfo>,
+) -> Result<Vec<RelayAgentInfo>, String> {
+    let definition_events = query_relay(
+        state,
+        &[serde_json::json!({
+            "kinds": [KIND_MANAGED_AGENT],
+        })],
+    )
+    .await?;
+
+    let mut definitions: HashMap<String, (crate::managed_agents::RespondTo, Vec<String>)> =
+        HashMap::new();
+    for event in &definition_events {
+        let Some(agent_pubkey) = d_tag_from_event(event) else {
+            continue;
+        };
+        let Ok(content) = managed_agent_content_from_event(event) else {
+            continue;
+        };
+        definitions.insert(
+            agent_pubkey,
+            (content.respond_to, content.respond_to_allowlist),
+        );
+    }
+
+    for agent in &mut agents {
+        if let Some((respond_to, allowlist)) = definitions.get(&agent.pubkey) {
+            agent.respond_to = Some(respond_to.clone());
+            agent.respond_to_allowlist = allowlist.clone();
+        }
+
+        let discovered_channel_ids = fetch_agent_channel_ids(state, &agent.pubkey).await?;
+        if !discovered_channel_ids.is_empty() {
+            let mut merged: HashSet<String> = agent.channel_ids.iter().cloned().collect();
+            merged.extend(discovered_channel_ids);
+            let mut channel_ids: Vec<String> = merged.into_iter().collect();
+            channel_ids.sort();
+            agent.channel_ids = channel_ids;
+        }
+    }
+
+    Ok(agents)
+}
 
 mod post_install_verification;
 
@@ -1055,7 +1139,13 @@ pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAg
         .get("agents")
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
+    let mut agents: Vec<RelayAgentInfo> =
+        serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))?;
+
+    // kind:10100 profiles are sparse: respond_to policy lives on kind:30177 and
+    // channel membership is on kind:39002. Merge both so Desktop mention
+    // eligibility (#4913 / #5363) sees the same data iOS already uses.
+    enrich_relay_agents_from_relay(state.inner(), agents).await
 }
 
 #[cfg(test)]
