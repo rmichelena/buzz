@@ -68,7 +68,7 @@ fn channel_ids_by_agent_from_membership_events(
         let Some(channel_id) = d_tag_from_event(event) else {
             continue;
         };
-        for tag in &event.tags {
+        for tag in event.tags.iter() {
             let slice = tag.as_slice();
             if slice.first().map(String::as_str) != Some("p") {
                 continue;
@@ -128,17 +128,19 @@ fn collect_managed_agent_definitions(
                 if created_at < *existing_created_at
                     || (created_at == *existing_created_at && event_id <= *existing_event_id) =>
             {
-                continue
+                continue;
             }
-            _ => definitions.insert(
-                agent_pubkey,
-                (
-                    content.respond_to,
-                    content.respond_to_allowlist,
-                    created_at,
-                    event_id,
-                ),
-            ),
+            _ => {
+                definitions.insert(
+                    agent_pubkey,
+                    (
+                        content.respond_to,
+                        content.respond_to_allowlist,
+                        created_at,
+                        event_id,
+                    ),
+                );
+            }
         }
     }
     definitions
@@ -1512,7 +1514,7 @@ mod tests {
             r#"{"name":"Scout","parallelism":1,"respond_to":"owner-only"}"#,
         )
         .tags(vec![Tag::parse(["d", &agent_pubkey]).unwrap()])
-        .created_at(Timestamp::from(100))
+        .custom_created_at(Timestamp::from(100))
         .sign_with_keys(&owner_keys)
         .unwrap();
         let newer = EventBuilder::new(
@@ -1520,7 +1522,7 @@ mod tests {
             r#"{"name":"Scout","parallelism":1,"respond_to":"anyone"}"#,
         )
         .tags(vec![Tag::parse(["d", &agent_pubkey]).unwrap()])
-        .created_at(Timestamp::from(200))
+        .custom_created_at(Timestamp::from(200))
         .sign_with_keys(&owner_keys)
         .unwrap();
         let expected_owners =
