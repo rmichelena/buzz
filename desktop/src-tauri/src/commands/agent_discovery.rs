@@ -16,25 +16,36 @@ use crate::{
 
 /// Relay HTTP `/query` default page size when `limit` is omitted.
 const RELAY_DEFAULT_QUERY_LIMIT: usize = 100;
+/// Relay hard cap for explicit `limit` (`DEFAULT_MAX_PAGE_LIMIT` in buzz-db).
+const RELAY_MAX_QUERY_LIMIT: usize = 1000;
 
 /// kind:39002 returns one members-list event per channel, not per agent.
 fn channel_membership_query_limit(agents: &[RelayAgentInfo]) -> usize {
     let agent_count = agents.len();
+    let sparse_10100 = agents.iter().all(|agent| agent.channel_ids.is_empty());
+    if sparse_10100 {
+        // kind:10100 often omits channel_ids; cardinality is unknown — request max page.
+        return RELAY_MAX_QUERY_LIMIT;
+    }
+
     let mut channel_ids = HashSet::new();
     for agent in agents {
         channel_ids.extend(agent.channel_ids.iter().cloned());
     }
-    // One 39002 event per channel where any agent is a member; sparse 10100
-    // channel_ids under-count, so keep headroom above the hint.
+    // One 39002 event per channel where any agent is a member.
     let channel_cardinality = channel_ids.len().max(agent_count);
     channel_cardinality
         .saturating_mul(2)
         .max(RELAY_DEFAULT_QUERY_LIMIT)
+        .min(RELAY_MAX_QUERY_LIMIT)
 }
 
 /// kind:30177 is replaceable by (author, kind, d): several events can share a d-tag.
 fn managed_agent_definition_query_limit(agent_count: usize) -> usize {
-    agent_count.saturating_mul(4).max(RELAY_DEFAULT_QUERY_LIMIT)
+    agent_count
+        .saturating_mul(4)
+        .max(RELAY_DEFAULT_QUERY_LIMIT)
+        .min(RELAY_MAX_QUERY_LIMIT)
 }
 
 fn d_tag_from_event(event: &nostr::Event) -> Option<String> {
@@ -209,9 +220,9 @@ async fn fetch_managed_agent_definitions(
 async fn fetch_channel_ids_by_agent(
     state: &AppState,
     agents: &[RelayAgentInfo],
-) -> HashMap<String, Vec<String>> {
+) -> Option<HashMap<String, Vec<String>>> {
     if agents.is_empty() {
-        return HashMap::new();
+        return Some(HashMap::new());
     }
 
     let agent_pubkeys: Vec<String> = agents.iter().map(|agent| agent.pubkey.clone()).collect();
@@ -227,15 +238,16 @@ async fn fetch_channel_ids_by_agent(
     )
     .await
     {
-        Ok(membership_events) => {
-            channel_ids_by_agent_from_membership_events(&membership_events, &agent_pubkey_set)
-        }
+        Ok(membership_events) => Some(channel_ids_by_agent_from_membership_events(
+            &membership_events,
+            &agent_pubkey_set,
+        )),
         Err(error) => {
             tracing::warn!(
                 error = %error,
                 "list_relay_agents: kind:39002 membership enrich failed"
             );
-            HashMap::new()
+            None
         }
     }
 }
@@ -253,15 +265,18 @@ async fn enrich_relay_agents_from_relay(
         fetch_managed_agent_definitions(state, &agent_pubkeys, &expected_owners).await;
 
     for agent in &mut agents {
-        if agent.respond_to.is_none() {
-            if let Some((respond_to, allowlist)) = definitions.get(&agent.pubkey) {
-                agent.respond_to = Some(respond_to.clone());
-                agent.respond_to_allowlist = allowlist.clone();
-            }
+        // Owner-verified kind:30177 overrides kind:10100 self-declared policy when present.
+        if let Some((respond_to, allowlist)) = definitions.get(&agent.pubkey) {
+            agent.respond_to = Some(respond_to.clone());
+            agent.respond_to_allowlist = allowlist.clone();
         }
 
-        if let Some(discovered_channel_ids) = channel_ids_by_agent.get(&agent.pubkey) {
-            agent.channel_ids = merge_channel_ids(&agent.channel_ids, discovered_channel_ids);
+        if let Some(discovered_by_agent) = &channel_ids_by_agent {
+            // kind:39002 is authoritative for membership; keep 10100 hints only on query failure.
+            agent.channel_ids = discovered_by_agent
+                .get(&agent.pubkey)
+                .cloned()
+                .unwrap_or_default();
         }
     }
 
@@ -1595,10 +1610,10 @@ mod tests {
     }
 
     #[test]
-    fn test_channel_membership_query_limit_floors_at_relay_default() {
+    fn test_channel_membership_query_limit_uses_max_page_when_10100_sparse() {
         assert_eq!(
             channel_membership_query_limit(&[test_relay_agent(&[])]),
-            RELAY_DEFAULT_QUERY_LIMIT
+            RELAY_MAX_QUERY_LIMIT
         );
     }
 
