@@ -7,9 +7,7 @@ use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
 
 use crate::{
     app_state::AppState,
-    managed_agents::{
-        agent_events::managed_agent_content_from_event, RelayAgentInfo,
-    },
+    managed_agents::{agent_events::managed_agent_content_from_event, RelayAgentInfo},
     nostr_convert,
     relay::query_relay,
 };
