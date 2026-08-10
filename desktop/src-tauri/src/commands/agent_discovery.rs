@@ -98,8 +98,10 @@ fn collect_managed_agent_definitions(
     events: &[nostr::Event],
     expected_owners: &HashMap<String, String>,
 ) -> HashMap<String, (crate::managed_agents::RespondTo, Vec<String>)> {
-    let mut definitions: HashMap<String, (crate::managed_agents::RespondTo, Vec<String>, u64, String)> =
-        HashMap::new();
+    let mut definitions: HashMap<
+        String,
+        (crate::managed_agents::RespondTo, Vec<String>, u64, String),
+    > = HashMap::new();
     for event in events {
         let Some(agent_pubkey) = d_tag_from_event(event) else {
             tracing::warn!("list_relay_agents: skipping kind:30177 event without d-tag");
@@ -141,7 +143,9 @@ fn collect_managed_agent_definitions(
     }
     definitions
         .into_iter()
-        .map(|(agent_pubkey, (respond_to, allowlist, _, _))| (agent_pubkey, (respond_to, allowlist)))
+        .map(|(agent_pubkey, (respond_to, allowlist, _, _))| {
+            (agent_pubkey, (respond_to, allowlist))
+        })
         .collect()
 }
 
