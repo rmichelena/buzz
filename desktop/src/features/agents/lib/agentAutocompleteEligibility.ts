@@ -40,9 +40,7 @@ export function relayAgentIsSharedWithUser(
 
   // Relay directory channel_ids can lag behind live channel membership; callers
   // pass bot members from the active channel composer as a fresher signal.
-  return (
-    channelMemberAgentPubkeys?.has(normalizePubkey(agent.pubkey)) === true
-  );
+  return channelMemberAgentPubkeys?.has(normalizePubkey(agent.pubkey)) === true;
 }
 
 export function relayAgentCanRespondInChannel(
@@ -102,11 +100,7 @@ export function getMentionableAgentPubkeys({
           ? // SECURITY: community/global autocomplete has no single channel context;
             // omit live-membership fallback so relay agents are not shown based on
             // channel-scoped membership hints alone (trust model: directory + shared channels).
-            relayAgentIsSharedWithUser(
-              agent,
-              sharedChannelIds,
-              currentPubkey,
-            )
+            relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)
           : relayAgentCanRespondInChannel(
               agent,
               eligibilityScope.channelId,
