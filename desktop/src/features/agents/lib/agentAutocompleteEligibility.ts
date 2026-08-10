@@ -151,6 +151,42 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+export function getMentionableAgentPubkeysFromComposer({
+  mentionChannelId,
+  channelMembers,
+  membersLoading,
+  hasExternalMembers,
+  currentPubkey,
+  managedAgentPubkeys,
+  relayAgents,
+  sharedChannelIds,
+}: {
+  mentionChannelId: string | null;
+  channelMembers: readonly ChannelMember[] | undefined;
+  membersLoading: boolean;
+  hasExternalMembers: boolean;
+  currentPubkey?: string | null;
+  managedAgentPubkeys: Iterable<string>;
+  relayAgents: readonly RelayAgent[] | undefined;
+  sharedChannelIds: ReadonlySet<string>;
+}) {
+  return getMentionableAgentPubkeys({
+    currentPubkey,
+    eligibilityScope: mentionChannelId
+      ? {
+          type: "channel",
+          channelId: mentionChannelId,
+          channelMembers,
+          membersLoading,
+          hasExternalMembers,
+        }
+      : { type: "managed-only" },
+    managedAgentPubkeys,
+    relayAgents,
+    sharedChannelIds,
+  });
+}
+
 export function isAgentIdentityInAllowedList(
   candidate: { isAgent?: boolean; pubkey: string },
   allowedAgentPubkeys: ReadonlySet<string>,
