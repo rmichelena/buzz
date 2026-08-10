@@ -201,12 +201,15 @@ export function useMentions(
     if (!mentionChannelId) {
       return undefined;
     }
+    if (externalMembers === undefined && membersQuery.isLoading) {
+      return new Set<string>();
+    }
     return new Set(
       (members ?? [])
         .filter((member) => member.isAgent === true || member.role === "bot")
         .map((member) => normalizePubkey(member.pubkey)),
     );
-  }, [members, mentionChannelId]);
+  }, [externalMembers, members, mentionChannelId, membersQuery.isLoading]);
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({

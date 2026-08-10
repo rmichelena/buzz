@@ -255,6 +255,29 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
+test("getMentionableAgentPubkeys: community scope ignores live membership fallback", () => {
+  const relayAgents = [
+    {
+      pubkey: PUB_B,
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [],
+    },
+  ];
+
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      eligibilityScope: { type: "community" },
+      managedAgentPubkeys: [PUB_A],
+      currentPubkey: CURRENT_PUBKEY,
+      relayAgents,
+      sharedChannelIds: new Set(["general"]),
+      channelMemberAgentPubkeys: new Set([PUB_B]),
+    }),
+    new Set([PUB_A]),
+  );
+});
+
 test("getMentionableAgentPubkeys: scopes channel composers and fails closed without context", () => {
   const relayAgents = [
     {

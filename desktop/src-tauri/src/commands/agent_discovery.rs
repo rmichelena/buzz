@@ -48,18 +48,6 @@ fn d_tag_from_event(event: &nostr::Event) -> Option<String> {
     })
 }
 
-fn channel_ids_from_membership_events(events: &[nostr::Event]) -> Vec<String> {
-    let mut channel_ids = HashSet::new();
-    for event in events {
-        if let Some(channel_id) = d_tag_from_event(event) {
-            channel_ids.insert(channel_id);
-        }
-    }
-    let mut sorted: Vec<String> = channel_ids.into_iter().collect();
-    sorted.sort();
-    sorted
-}
-
 fn channel_ids_by_agent_from_membership_events(
     events: &[nostr::Event],
     agent_pubkeys: &HashSet<String>,
@@ -107,10 +95,11 @@ fn collect_managed_agent_definitions(
             continue;
         };
         let event_author = event.pubkey.to_hex();
-        if let Some(expected_owner) = expected_owners.get(&agent_pubkey) {
-            if event_author != *expected_owner {
-                continue;
-            }
+        let Some(expected_owner) = expected_owners.get(&agent_pubkey) else {
+            continue;
+        };
+        if event_author != *expected_owner {
+            continue;
         }
         let Ok(content) = managed_agent_content_from_event(event) else {
             tracing::warn!(
@@ -248,15 +237,19 @@ async fn enrich_relay_agents_from_relay(
     mut agents: Vec<RelayAgentInfo>,
 ) -> Vec<RelayAgentInfo> {
     let agent_pubkeys: Vec<String> = agents.iter().map(|agent| agent.pubkey.clone()).collect();
-    let expected_owners = fetch_agent_owner_pubkeys(state, &agent_pubkeys).await;
+    let (expected_owners, channel_ids_by_agent) = tokio::join!(
+        fetch_agent_owner_pubkeys(state, &agent_pubkeys),
+        fetch_channel_ids_by_agent(state, &agents),
+    );
     let definitions =
         fetch_managed_agent_definitions(state, &agent_pubkeys, &expected_owners).await;
-    let channel_ids_by_agent = fetch_channel_ids_by_agent(state, &agents).await;
 
     for agent in &mut agents {
-        if let Some((respond_to, allowlist)) = definitions.get(&agent.pubkey) {
-            agent.respond_to = Some(respond_to.clone());
-            agent.respond_to_allowlist = allowlist.clone();
+        if agent.respond_to.is_none() {
+            if let Some((respond_to, allowlist)) = definitions.get(&agent.pubkey) {
+                agent.respond_to = Some(respond_to.clone());
+                agent.respond_to_allowlist = allowlist.clone();
+            }
         }
 
         if let Some(discovered_channel_ids) = channel_ids_by_agent.get(&agent.pubkey) {
@@ -1445,20 +1438,6 @@ mod tests {
     }
 
     #[test]
-    fn test_channel_ids_from_membership_events_deduplicates_and_sorts() {
-        let member_pubkey = "a".repeat(64);
-        let events = vec![
-            test_membership_event("channel-b", &member_pubkey),
-            test_membership_event("channel-a", &member_pubkey),
-            test_membership_event("channel-b", &member_pubkey),
-        ];
-        assert_eq!(
-            channel_ids_from_membership_events(&events),
-            vec!["channel-a".to_string(), "channel-b".to_string()]
-        );
-    }
-
-    #[test]
     fn test_channel_ids_by_agent_from_membership_events_groups_by_p_tag() {
         let agent_a = "a".repeat(64);
         let agent_b = "b".repeat(64);
@@ -1486,7 +1465,9 @@ mod tests {
             "anyone",
             &owner_keys,
         )];
-        let definitions = collect_managed_agent_definitions(&events, &HashMap::new());
+        let expected_owners =
+            HashMap::from([(agent_pubkey.clone(), owner_keys.public_key().to_hex())]);
+        let definitions = collect_managed_agent_definitions(&events, &expected_owners);
         let (respond_to, allowlist) = definitions.get(&agent_pubkey).unwrap();
         assert_eq!(*respond_to, crate::managed_agents::RespondTo::Anyone);
         assert!(allowlist.is_empty());
@@ -1513,7 +1494,9 @@ mod tests {
         .created_at(Timestamp::from(200))
         .sign_with_keys(&owner_keys)
         .unwrap();
-        let definitions = collect_managed_agent_definitions(&[older, newer], &HashMap::new());
+        let expected_owners =
+            HashMap::from([(agent_pubkey.clone(), owner_keys.public_key().to_hex())]);
+        let definitions = collect_managed_agent_definitions(&[older, newer], &expected_owners);
         let (respond_to, _) = definitions.get(&agent_pubkey).unwrap();
         assert_eq!(*respond_to, crate::managed_agents::RespondTo::Anyone);
     }
@@ -1532,6 +1515,20 @@ mod tests {
             collect_managed_agent_definitions(&[legitimate, spoofed], &expected_owners);
         let (respond_to, _) = definitions.get(&agent_pubkey).unwrap();
         assert_eq!(*respond_to, crate::managed_agents::RespondTo::Anyone);
+    }
+
+    #[test]
+    fn test_collect_managed_agent_definitions_skips_when_owner_unverified() {
+        use nostr::Keys;
+        let agent_pubkey = "a".repeat(64);
+        let owner_keys = Keys::generate();
+        let events = vec![test_managed_agent_definition_event(
+            &agent_pubkey,
+            "anyone",
+            &owner_keys,
+        )];
+        let definitions = collect_managed_agent_definitions(&events, &HashMap::new());
+        assert!(definitions.is_empty());
     }
 
     #[test]
@@ -1575,7 +1572,18 @@ mod tests {
             test_relay_agent(&["channel-a", "channel-b", "channel-c"]),
             test_relay_agent(&["channel-d"]),
         ];
-        assert_eq!(channel_membership_query_limit(&agents), 8);
+        assert_eq!(
+            channel_membership_query_limit(&agents),
+            RELAY_DEFAULT_QUERY_LIMIT
+        );
+    }
+
+    #[test]
+    fn test_channel_membership_query_limit_scales_above_relay_default() {
+        let channel_ids: Vec<String> = (0..51).map(|i| format!("channel-{i}")).collect();
+        let channel_refs: Vec<&str> = channel_ids.iter().map(String::as_str).collect();
+        let agents = vec![test_relay_agent(&channel_refs)];
+        assert_eq!(channel_membership_query_limit(&agents), 102);
     }
 
     #[test]
@@ -1588,11 +1596,19 @@ mod tests {
 
     #[test]
     fn test_managed_agent_definition_query_limit_allows_multiple_authors_per_d_tag() {
-        assert_eq!(managed_agent_definition_query_limit(5), 20);
+        assert_eq!(
+            managed_agent_definition_query_limit(5),
+            RELAY_DEFAULT_QUERY_LIMIT
+        );
         assert_eq!(
             managed_agent_definition_query_limit(1),
             RELAY_DEFAULT_QUERY_LIMIT
         );
+    }
+
+    #[test]
+    fn test_managed_agent_definition_query_limit_scales_above_relay_default() {
+        assert_eq!(managed_agent_definition_query_limit(26), 104);
     }
 
     // ── adapter_needs_install (codex version gate) ────────────────────────────
