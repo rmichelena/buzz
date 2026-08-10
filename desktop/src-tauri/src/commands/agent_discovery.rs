@@ -14,6 +14,29 @@ use crate::{
     relay::query_relay,
 };
 
+/// Relay HTTP `/query` default page size when `limit` is omitted.
+const RELAY_DEFAULT_QUERY_LIMIT: usize = 100;
+
+/// kind:39002 returns one members-list event per channel, not per agent.
+fn channel_membership_query_limit(agents: &[RelayAgentInfo]) -> usize {
+    let agent_count = agents.len();
+    let mut channel_ids = HashSet::new();
+    for agent in agents {
+        channel_ids.extend(agent.channel_ids.iter().cloned());
+    }
+    // One 39002 event per channel where any agent is a member; sparse 10100
+    // channel_ids under-count, so keep headroom above the hint.
+    let channel_cardinality = channel_ids.len().max(agent_count);
+    channel_cardinality
+        .saturating_mul(2)
+        .max(RELAY_DEFAULT_QUERY_LIMIT)
+}
+
+/// kind:30177 is replaceable by (author, kind, d): several events can share a d-tag.
+fn managed_agent_definition_query_limit(agent_count: usize) -> usize {
+    agent_count.saturating_mul(4).max(RELAY_DEFAULT_QUERY_LIMIT)
+}
+
 fn d_tag_from_event(event: &nostr::Event) -> Option<String> {
     event.tags.iter().find_map(|tag| {
         let slice = tag.as_slice();
@@ -169,7 +192,7 @@ async fn fetch_managed_agent_definitions(
     let filter = serde_json::json!({
         "kinds": [KIND_MANAGED_AGENT],
         "#d": agent_pubkeys,
-        "limit": agent_pubkeys.len(),
+        "limit": managed_agent_definition_query_limit(agent_pubkeys.len()),
     });
 
     match query_relay(state, &[filter]).await {
@@ -188,26 +211,28 @@ async fn fetch_managed_agent_definitions(
 
 async fn fetch_channel_ids_by_agent(
     state: &AppState,
-    agent_pubkeys: &[String],
+    agents: &[RelayAgentInfo],
 ) -> HashMap<String, Vec<String>> {
-    if agent_pubkeys.is_empty() {
+    if agents.is_empty() {
         return HashMap::new();
     }
+
+    let agent_pubkeys: Vec<String> = agents.iter().map(|agent| agent.pubkey.clone()).collect();
+    let agent_pubkey_set: HashSet<String> = agent_pubkeys.iter().cloned().collect();
 
     match query_relay(
         state,
         &[serde_json::json!({
             "kinds": [39002],
             "#p": agent_pubkeys,
-            "limit": agent_pubkeys.len(),
+            "limit": channel_membership_query_limit(agents),
         })],
     )
     .await
     {
-        Ok(membership_events) => channel_ids_by_agent_from_membership_events(
-            &membership_events,
-            &agent_pubkeys.iter().cloned().collect(),
-        ),
+        Ok(membership_events) => {
+            channel_ids_by_agent_from_membership_events(&membership_events, &agent_pubkey_set)
+        }
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -226,7 +251,7 @@ async fn enrich_relay_agents_from_relay(
     let expected_owners = fetch_agent_owner_pubkeys(state, &agent_pubkeys).await;
     let definitions =
         fetch_managed_agent_definitions(state, &agent_pubkeys, &expected_owners).await;
-    let channel_ids_by_agent = fetch_channel_ids_by_agent(state, &agent_pubkeys).await;
+    let channel_ids_by_agent = fetch_channel_ids_by_agent(state, &agents).await;
 
     for agent in &mut agents {
         if let Some((respond_to, allowlist)) = definitions.get(&agent.pubkey) {
@@ -1528,6 +1553,46 @@ mod tests {
     fn test_merge_channel_ids_returns_existing_when_discovered_is_empty() {
         let existing = vec!["channel-a".to_string()];
         assert_eq!(merge_channel_ids(&existing, &[]), existing);
+    }
+
+    fn test_relay_agent(channel_ids: &[&str]) -> RelayAgentInfo {
+        RelayAgentInfo {
+            pubkey: "a".repeat(64),
+            name: "Scout".to_string(),
+            agent_type: "agent".to_string(),
+            channels: vec![],
+            channel_ids: channel_ids.iter().map(|id| (*id).to_string()).collect(),
+            capabilities: vec![],
+            status: "offline".to_string(),
+            respond_to: None,
+            respond_to_allowlist: vec![],
+        }
+    }
+
+    #[test]
+    fn test_channel_membership_query_limit_scales_with_channel_cardinality() {
+        let agents = vec![
+            test_relay_agent(&["channel-a", "channel-b", "channel-c"]),
+            test_relay_agent(&["channel-d"]),
+        ];
+        assert_eq!(channel_membership_query_limit(&agents), 8);
+    }
+
+    #[test]
+    fn test_channel_membership_query_limit_floors_at_relay_default() {
+        assert_eq!(
+            channel_membership_query_limit(&[test_relay_agent(&[])]),
+            RELAY_DEFAULT_QUERY_LIMIT
+        );
+    }
+
+    #[test]
+    fn test_managed_agent_definition_query_limit_allows_multiple_authors_per_d_tag() {
+        assert_eq!(managed_agent_definition_query_limit(5), 20);
+        assert_eq!(
+            managed_agent_definition_query_limit(1),
+            RELAY_DEFAULT_QUERY_LIMIT
+        );
     }
 
     // ── adapter_needs_install (codex version gate) ────────────────────────────
