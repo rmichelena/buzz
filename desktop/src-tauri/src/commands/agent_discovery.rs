@@ -36,16 +36,14 @@ fn channel_membership_query_limit(agents: &[RelayAgentInfo]) -> usize {
     let channel_cardinality = channel_ids.len().max(agent_count);
     channel_cardinality
         .saturating_mul(2)
-        .max(RELAY_DEFAULT_QUERY_LIMIT)
-        .min(RELAY_MAX_QUERY_LIMIT)
+        .clamp(RELAY_DEFAULT_QUERY_LIMIT, RELAY_MAX_QUERY_LIMIT)
 }
 
 /// kind:30177 is replaceable by (author, kind, d): several events can share a d-tag.
 fn managed_agent_definition_query_limit(agent_count: usize) -> usize {
     agent_count
         .saturating_mul(4)
-        .max(RELAY_DEFAULT_QUERY_LIMIT)
-        .min(RELAY_MAX_QUERY_LIMIT)
+        .clamp(RELAY_DEFAULT_QUERY_LIMIT, RELAY_MAX_QUERY_LIMIT)
 }
 
 fn d_tag_from_event(event: &nostr::Event) -> Option<String> {
@@ -273,7 +271,7 @@ async fn enrich_relay_agents_from_relay(
     for agent in &mut agents {
         // Owner-verified kind:30177 overrides kind:10100 self-declared policy when present.
         if let Some((respond_to, allowlist)) = definitions.get(&agent.pubkey) {
-            agent.respond_to = Some(respond_to.clone());
+            agent.respond_to = Some(*respond_to);
             agent.respond_to_allowlist = allowlist.clone();
         }
 
