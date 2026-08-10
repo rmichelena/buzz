@@ -98,7 +98,7 @@ fn collect_managed_agent_definitions(
     events: &[nostr::Event],
     expected_owners: &HashMap<String, String>,
 ) -> HashMap<String, (crate::managed_agents::RespondTo, Vec<String>)> {
-    let mut definitions: HashMap<String, (crate::managed_agents::RespondTo, Vec<String>, u64)> =
+    let mut definitions: HashMap<String, (crate::managed_agents::RespondTo, Vec<String>, u64, String)> =
         HashMap::new();
     for event in events {
         let Some(agent_pubkey) = d_tag_from_event(event) else {
@@ -120,29 +120,29 @@ fn collect_managed_agent_definitions(
             continue;
         };
         let created_at = event.created_at.as_secs();
+        let event_id = event.id.to_hex();
         match definitions.get(&agent_pubkey) {
-            Some((_, _, existing_created_at)) if created_at <= *existing_created_at => continue,
+            Some((_, _, existing_created_at, existing_event_id))
+                if created_at < *existing_created_at
+                    || (created_at == *existing_created_at && event_id <= *existing_event_id) =>
+            {
+                continue
+            }
             _ => definitions.insert(
                 agent_pubkey,
-                (content.respond_to, content.respond_to_allowlist, created_at),
+                (
+                    content.respond_to,
+                    content.respond_to_allowlist,
+                    created_at,
+                    event_id,
+                ),
             ),
         }
     }
     definitions
         .into_iter()
-        .map(|(agent_pubkey, (respond_to, allowlist, _))| (agent_pubkey, (respond_to, allowlist)))
+        .map(|(agent_pubkey, (respond_to, allowlist, _, _))| (agent_pubkey, (respond_to, allowlist)))
         .collect()
-}
-
-fn merge_channel_ids(existing: &[String], discovered: &[String]) -> Vec<String> {
-    if discovered.is_empty() {
-        return existing.to_vec();
-    }
-    let mut merged: HashSet<String> = existing.iter().cloned().collect();
-    merged.extend(discovered.iter().cloned());
-    let mut channel_ids: Vec<String> = merged.into_iter().collect();
-    channel_ids.sort();
-    channel_ids
 }
 
 async fn fetch_agent_owner_pubkeys(
@@ -272,11 +272,13 @@ async fn enrich_relay_agents_from_relay(
         }
 
         if let Some(discovered_by_agent) = &channel_ids_by_agent {
-            // kind:39002 is authoritative for membership; keep 10100 hints only on query failure.
+            // kind:39002 is authoritative for membership; keep 10100 hints on query failure
+            // or when an agent is absent from a truncated page (R5 M2).
+            let existing_channel_ids = agent.channel_ids.clone();
             agent.channel_ids = discovered_by_agent
                 .get(&agent.pubkey)
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or(existing_channel_ids);
         }
     }
 
@@ -1552,27 +1554,6 @@ mod tests {
         )];
         let definitions = collect_managed_agent_definitions(&events, &HashMap::new());
         assert!(definitions.is_empty());
-    }
-
-    #[test]
-    fn test_merge_channel_ids_preserves_existing_and_adds_discovered() {
-        assert_eq!(
-            merge_channel_ids(
-                &["channel-z".to_string(), "channel-a".to_string()],
-                &["channel-b".to_string(), "channel-a".to_string()],
-            ),
-            vec![
-                "channel-a".to_string(),
-                "channel-b".to_string(),
-                "channel-z".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_merge_channel_ids_returns_existing_when_discovered_is_empty() {
-        let existing = vec!["channel-a".to_string()];
-        assert_eq!(merge_channel_ids(&existing, &[]), existing);
     }
 
     fn test_relay_agent(channel_ids: &[&str]) -> RelayAgentInfo {

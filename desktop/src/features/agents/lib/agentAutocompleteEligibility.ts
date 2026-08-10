@@ -99,8 +99,9 @@ export function getMentionableAgentPubkeys({
       eligibilityScope.type === "managed-only"
         ? false
         : eligibilityScope.type === "community"
-          ? // Community/global autocomplete has no single channel context, so we
-            // intentionally omit the live-membership fallback here.
+          ? // SECURITY: community/global autocomplete has no single channel context;
+            // omit live-membership fallback so relay agents are not shown based on
+            // channel-scoped membership hints alone (trust model: directory + shared channels).
             relayAgentIsSharedWithUser(
               agent,
               sharedChannelIds,
