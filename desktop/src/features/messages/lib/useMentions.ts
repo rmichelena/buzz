@@ -740,7 +740,8 @@ export function useMentions(
   );
 
   const isAgentPubkey = React.useCallback(
-    (pubkey: string): boolean => mentionableAgentPubkeys.has(normalizePubkey(pubkey)),
+    (pubkey: string): boolean =>
+      mentionableAgentPubkeys.has(normalizePubkey(pubkey)),
     [mentionableAgentPubkeys],
   );
   const isManagedAgentPubkey = React.useCallback(
