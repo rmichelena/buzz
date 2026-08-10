@@ -162,7 +162,7 @@ async fn fetch_agent_owner_pubkeys(
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "list_relay_agents: kind:0 owner lookup failed; continuing without owner filter"
+                "list_relay_agents: kind:0 owner lookup failed; skipping kind:30177 enrichment"
             );
             HashMap::new()
         }
@@ -174,13 +174,21 @@ async fn fetch_managed_agent_definitions(
     agent_pubkeys: &[String],
     expected_owners: &HashMap<String, String>,
 ) -> HashMap<String, (crate::managed_agents::RespondTo, Vec<String>)> {
-    if agent_pubkeys.is_empty() {
+    if agent_pubkeys.is_empty() || expected_owners.is_empty() {
         return HashMap::new();
     }
+
+    let owner_pubkeys: Vec<String> = expected_owners
+        .values()
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
 
     let filter = serde_json::json!({
         "kinds": [KIND_MANAGED_AGENT],
         "#d": agent_pubkeys,
+        "authors": owner_pubkeys,
         "limit": managed_agent_definition_query_limit(agent_pubkeys.len()),
     });
 
