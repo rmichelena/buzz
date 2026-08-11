@@ -49,7 +49,11 @@ export function relayAgentIsSharedWithUser(
       .includes(normalizedCurrentPubkey);
   }
 
-  if (agent.respondTo !== "anyone") {
+  // `respondTo === null` means the directory has no policy for this agent (no
+  // kind:10100 `respond_to`, or a membership-derived entry). Unknown policy is
+  // not a denial: membership decides visibility, `respond_to` decides whether a
+  // send is answered. Only an explicit not-invocable mode hides the agent.
+  if (agent.respondTo != null && agent.respondTo !== "anyone") {
     return false;
   }
 
@@ -145,6 +149,29 @@ export function getMentionableAgentPubkeys({
             );
     if (isAllowed) {
       pubkeys.add(normalizePubkey(agent.pubkey));
+    }
+  }
+
+  // The relay agent directory is seeded from kind:10100, an event each agent
+  // publishes about itself — a `bot` channel member that never published it is
+  // absent from `relayAgents` entirely, so the loop above can't reach it and the
+  // agent becomes unmentionable, un-DM-able and un-addable from the UI. Channel
+  // membership is the authoritative signal that the agent is here, so seed from
+  // it too. Directory entries still win: an agent the directory knows about was
+  // already judged above by its `respond_to`, so a not-invocable one stays out.
+  // In `community` scope there is no single channel context, so this only uses
+  // the set a caller passes explicitly — callers must pass bot members of
+  // channels the viewer actually shares, never a channel-scoped hint from
+  // elsewhere.
+  if (eligibilityScope.type !== "managed-only") {
+    const directoryPubkeys = new Set(
+      (relayAgents ?? []).map((agent) => normalizePubkey(agent.pubkey)),
+    );
+    for (const memberPubkey of resolvedChannelMemberAgentPubkeys ?? []) {
+      const normalized = normalizePubkey(memberPubkey);
+      if (!directoryPubkeys.has(normalized)) {
+        pubkeys.add(normalized);
+      }
     }
   }
 

@@ -104,6 +104,25 @@ test("dm recipients: community scope surfaces a shared-channel bot with no direc
   assert.equal(allowed.has(MEMBER_BOT_WITHOUT_DIRECTORY_ENTRY), true);
 });
 
+// ── Directory entry with no policy (kind:10100 without respond_to) ───────────
+
+test("composer: a directory agent with an unknown policy is visible when shared", () => {
+  // `respondTo: null` = the directory has no policy for this agent. Unknown is
+  // not a denial: it must not read as owner-only.
+  const allowed = composerAllowedList({
+    relayAgents: [
+      {
+        pubkey: MEMBER_BOT_WITHOUT_DIRECTORY_ENTRY,
+        respondTo: null,
+        respondToAllowlist: [],
+        channelIds: [CHANNEL_ID],
+      },
+    ],
+  });
+
+  assert.equal(allowed.has(MEMBER_BOT_WITHOUT_DIRECTORY_ENTRY), true);
+});
+
 // ── Guards: these must stay green after the fix ───────────────────────────────
 
 test("guard: a non-member owner-only relay agent stays out of the composer list", () => {
